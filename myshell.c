@@ -11,7 +11,38 @@
 #define PROMPT "\033[1;36m" "msh> " "\033[0m"
 #define SIZE 1024 // Tamaño buffer de stdin
 
-static void execute_command(tline* line);
+static void     print_prompt();
+static void     read_command(char** buffer, tline** line);
+static char*    read_line(FILE* archivo);
+static void     execute_command(tline* line);
+
+int main(){
+    tline*  line;
+    char*   buffer;
+
+    while (1)
+    {
+        print_prompt();
+        read_command(&buffer, &line);
+        execute_command(line);
+    }    
+}
+
+static void print_prompt() {
+    char*   pwd;
+
+    // fputs(PROMPT, stdout);
+
+    pwd = getenv("PWD");
+    printf("%s %s", pwd, PROMPT);   
+
+}
+
+static void read_command(char** buffer, tline** line) {
+
+    *buffer = read_line(stdin);
+    *line = tokenize(*buffer);
+}
 
 static char* read_line(FILE* archivo) {
     char* linea;
@@ -27,41 +58,36 @@ static char* read_line(FILE* archivo) {
     return linea;
 }
 
-int main(){
-    tline*    line;
-    char*    buffer;
-
-    fputs(PROMPT, stdout);
-    while (buffer = read_line(stdin))
-    {
-        line = tokenize(buffer);
-        if (line -> ncommands > 0)
-            execute_command(line);
-        fputs(PROMPT, stdout);
-    }
-    
-}
-
 static void execute_command(tline* line){
     
+    if (!(line -> ncommands > 0))
+        return;
+
+    // Creamos un proceso hijo
     pid_t pid = fork();
 
+    // Tanto el proceso padre como el hijo empiezan a ejecutar los comandos
+
+    // El pid == 0 avisa al proceso hijo que el es el hijo
     if (pid == 0) {
         // Esto se ejecuta en el proceso hijo
         if (execvp(line->commands[0].argv[0], line->commands[0].argv) == -1) {
             perror("execvp");
             exit(EXIT_FAILURE);
-    }
-
-    } else if (pid > 0) {
+        }
+    } 
+    // pid = (proceso hijo) fork a almacenado el proceso hijo en pid para indicar que este es el proceso padre
+    else if (pid > 0) {
         // Esto se ejecuta en el proceso padre
         if (!line->background) {
             int status;
             waitpid(pid, &status, 0);
+        }
     }
-
-    } else {
+    // Nos han devuelto -1 ha habido error en el fork
+    else {
         // Error al crear el proceso hijo
         perror("fork");
+        exit(EXIT_FAILURE);
     }
 }
