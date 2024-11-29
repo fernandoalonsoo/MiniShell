@@ -16,7 +16,7 @@ static void     print_prompt();
 static void     read_command(char** buffer, tline** line);
 static char*    read_line(FILE* archivo);
 static void     manage_fd(tline* line, int n);
-/* static void     manage_pipes(tline* line, int n); */
+static int     execute_cd(tline* line);
 static void     execute_commands(tline* line);
 
 
@@ -35,10 +35,10 @@ int main(){
 static void print_prompt() {
     // char*   pwd;
 
-    fputs(PROMPT, stdout);
+     fputs(PROMPT, stdout);
 
 /*     pwd = getenv("PWD");
-    printf("%s %s", pwd, PROMPT);    */
+    printf("%s %s", pwd, PROMPT);   */ 
 
 }
 
@@ -96,10 +96,30 @@ static void     manage_fd(tline* line, int n){
     }
 }
 
-/* static void     manage_pipes(tline* line, int n){
+static int     execute_cd(tline* line){
 
-
-} */
+    // Detectar si el primer comando es "cd"
+    if (strcmp(line->commands[0].argv[0], "cd") == 0) {
+        if (line -> commands[0].argc > 1)
+        {
+            if (chdir(line -> commands[0].argv[1]) != 0)
+                perror("cd");
+        }
+        else
+        {
+            char *home = getenv("HOME");
+            if (!home)
+                perror("Cd: variable home no encontrada");
+            else
+            {
+                if (chdir(home) != 0)
+                    perror("cd");
+            }
+        }
+        return 1; // Salir de la función exitosamente ejecutando cd
+    }
+    return 0;
+}
     
 static void     execute_commands(tline* line){
     int i;
@@ -108,9 +128,18 @@ static void     execute_commands(tline* line){
 
     if (!(line -> ncommands > 0))
         return;
-
+    
+    i = 0;
+    if (execute_cd(line)) {
+        // Si es cd y es el único comando, no hace falta continuar
+        if (line->ncommands == 1) {
+            return;
+        }
+        i++;  // Sino incrementamos en 1
+    }
+    
     last_pipe = -1;
-    for (i = 0; i < line->ncommands; i++) 
+    for (; i < line->ncommands; i++) 
     {
         // Si no estamos en el último comando creamos un pipe
         if (i < line -> ncommands - 1)
@@ -128,7 +157,6 @@ static void     execute_commands(tline* line){
 
         // El pid == 0 avisa al proceso hijo que el es el hijo
         if (pid == 0) {
-
             // Si no es el primer comando, redirigir la entrada estándar al pipe anterior
             if (last_pipe != -1) {
                 if (dup2(last_pipe, STDIN_FILENO) == -1) {
@@ -168,11 +196,11 @@ static void     execute_commands(tline* line){
         }   
         // pid = (proceso hijo) fork a almacenado el proceso hijo en pid para indicar que este es el proceso padre
         else if (pid > 0) {
-
+ 
             if (!line->background) {
                 int status;
                 waitpid(pid, &status, 0);
-            }
+            } 
 
             // El proceso padre cierra los extremos del pipe que no necesita
             if (last_pipe != -1) {
