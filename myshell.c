@@ -12,11 +12,16 @@
 #define PROMPT "\033[1;36m" "msh> " "\033[0m"
 #define SIZE 1024 // Tamaño buffer de stdin
 
+static int      check_internal_commands(tline* line);
+static int      execute_exit();
+static int      execute_cd(tline* line);
+static int      execute_jobs();
+/* static int   execute_fg();
+static int      execute_umask(); */
 static void     print_prompt();
 static void     read_command(char** buffer, tline** line);
 static char*    read_line(FILE* archivo);
 static void     manage_fd(tline* line, int n);
-static int     execute_cd(tline* line);
 static void     execute_commands(tline* line);
 
 
@@ -30,6 +35,54 @@ int main(){
         read_command(&buffer, &line);
         execute_commands(line);
     }    
+}
+
+static int     check_internal_commands(tline* line){
+
+    if (strcmp(line->commands[0].argv[0], "exit") == 0)
+        return execute_exit(line);
+    if (strcmp(line->commands[0].argv[0], "cd") == 0)
+        return execute_cd(line);
+    if (strcmp(line->commands[0].argv[0], "jobs") == 0)
+        return execute_jobs(line);
+    /*if (strcmp(line->commands[0].argv[0], "fg") == 0)
+        return execute_fg();    
+    if (strcmp(line->commands[0].argv[0], "umask") == 0)
+        return execute_umask(); */
+    
+    return 0;
+}
+
+static int     execute_exit(){ // Como parametro los procesos en segundo plano
+    // Matar procesos restantes
+    exit(0);
+    return 1; 
+}
+
+static int     execute_cd(tline* line){
+
+        if (line -> commands[0].argc > 1)
+        {
+            if (chdir(line -> commands[0].argv[1]) != 0)
+                perror("cd");
+        }
+        else
+        {
+            char *home = getenv("HOME");
+            if (!home)
+                perror("Cd: variable home no encontrada");
+            else
+            {
+                if (chdir(home) != 0)
+                    perror("cd");
+            }
+        }
+        return 1; // Salir de la función exitosamente ejecutando cd
+}
+
+static int     execute_jobs(){
+
+    return 1;
 }
 
 static void print_prompt() {
@@ -95,31 +148,6 @@ static void     manage_fd(tline* line, int n){
         close(fd);
     }
 }
-
-static int     execute_cd(tline* line){
-
-    // Detectar si el primer comando es "cd"
-    if (strcmp(line->commands[0].argv[0], "cd") == 0) {
-        if (line -> commands[0].argc > 1)
-        {
-            if (chdir(line -> commands[0].argv[1]) != 0)
-                perror("cd");
-        }
-        else
-        {
-            char *home = getenv("HOME");
-            if (!home)
-                perror("Cd: variable home no encontrada");
-            else
-            {
-                if (chdir(home) != 0)
-                    perror("cd");
-            }
-        }
-        return 1; // Salir de la función exitosamente ejecutando cd
-    }
-    return 0;
-}
     
 static void     execute_commands(tline* line){
     int i;
@@ -130,14 +158,14 @@ static void     execute_commands(tline* line){
         return;
     
     i = 0;
-    if (execute_cd(line)) {
-        // Si es cd y es el único comando, no hace falta continuar
+    if (check_internal_commands(line) == 1) {
+        // Si es el único comando, no hace falta continuar
         if (line->ncommands == 1) {
             return;
         }
         i++;  // Sino incrementamos en 1
     }
-    
+
     last_pipe = -1;
     for (; i < line->ncommands; i++) 
     {
@@ -219,7 +247,6 @@ static void     execute_commands(tline* line){
         }
     } 
     // Cerramos el último pipe
-    if (last_pipe != -1) {
+    if (last_pipe != -1) 
         close(last_pipe);
-    }
 }
