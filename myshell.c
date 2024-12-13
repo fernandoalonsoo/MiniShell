@@ -117,14 +117,9 @@ static void check_background_jobs() {
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
         job_t *job = jobs_list;
-        while (job != NULL) {
+        while (job) {
             if (job->pid == pid) {
-                if (WIFSTOPPED(status)) {
-                    if (job->status != JOB_STOPPED) {
-                        job->status = JOB_STOPPED;
-                        printf("\n[%d]+ Stopped\t%s\n", job->job_id, job->command);
-                    }
-                } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                if (WIFEXITED(status) || WIFSIGNALED(status)) {
                     printf("\n[%d]+ Done\t%s\n", job->job_id, job->command);
                     remove_job(pid);
                 }
@@ -134,6 +129,7 @@ static void check_background_jobs() {
         }
     }
 }
+
 
 static int execute_umask(tline* line) {
     mode_t mask;
@@ -183,7 +179,7 @@ static int     check_internal_commands(tline* line){
     if (strcmp(line->commands[0].argv[0], "jobs") == 0)
         return execute_jobs();
     if (strcmp(line->commands[0].argv[0], "bg") == 0)
-    return execute_bg(line);
+        return execute_bg(line);
     if (strcmp(line->commands[0].argv[0], "umask") == 0)
         return execute_umask(line);
     return 0;
@@ -334,17 +330,17 @@ static int execute_bg(tline *line) {
         }
     } else {
         fprintf(stderr, "bg: uso incorrecto\n");
-        return -1;
+        return 1;
     }
 
     if (job == NULL) {
         fprintf(stderr, "bg: no hay trabajos detenidos\n");
-        return -1;
+        return 1;
     }
 
     job->status = JOB_RUNNING;
     kill(job->pid, SIGCONT);
-    printf("[%d]+ %s &\n", job->job_id, job->command);
+    printf("[%d]+ %s\n", job->job_id, job->command);
 
     return 1;
 }
@@ -567,35 +563,38 @@ static void     execute_commands(tline* line){
         // pid = (proceso hijo) fork a almacenado el proceso hijo en pid para indicar que este es el proceso padre
         else if (pid > 0) {
             if (line->background && i == line->ncommands - 1) {
-                // Si es un proceso en segundo plano, agregarlo a la lista de trabajos
                 add_job(pid, line);
                 job_t *job = jobs_list;
                 printf("[%d] %d\n", job->job_id, pid);
-            } else if (!line->background) {
-                // Si es un proceso en primer plano
+            } 
+            else if (!line->background) {
                 foreground_pid = pid;  // Guarda el PID del proceso en primer plano
                 int status;
 
                 // Espera al proceso en primer plano
                 waitpid(pid, &status, WUNTRACED);
-                // Restablece foreground_pid si el proceso termina o es detenido
-                foreground_pid = -1;
+                foreground_pid = -1; // Restablece foreground_pid después de waitpid
 
                 if (WIFSTOPPED(status)) {
-                    // Si el proceso fue detenido, actualiza el estado en la lista de trabajos
+                    // Si el proceso fue detenido, actualiza su estado
                     update_job_status(pid, JOB_STOPPED);
                     job_t *job = jobs_list;
                     while (job && job->pid != pid) {
                         job = job->next;
                     }
                     if (job) {
-                        printf("\n[%d]+ Stopped\t%s\n", job->job_id, job->command);
+                        printf("[%d]+ Stopped\t%s\n", job->job_id, job->command);
+                    } else {
+                        // Si el trabajo no está en la lista, agrégalo como detenido
+                        add_job(pid, line);
+                        printf("[%d]+ Stopped\t%s\n", get_available_id() - 1, line->commands[i].argv[0]);
                     }
                 } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
                     // Si el proceso terminó, elimínalo de la lista de trabajos
                     remove_job(pid);
                 }
             }
+
 
     // Cierre de pipes
     if (last_pipe != -1) {
