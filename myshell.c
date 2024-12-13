@@ -24,12 +24,20 @@ typedef struct job{
 } job_t;
 
 static job_t    *jobs_list = NULL;
-static int      next_job_id = 1;
+
+typedef struct id_node {
+    int id;
+    struct id_node *next;
+} id_list_t;
+
+static id_list_t *available_ids = NULL;
+
+static pid_t foreground_pid = -1; // = PIP cuando hay proceso en primer plano, -1 cuando no hay procesos
 
 // Signal handlers
-static void sigint_handler(int sign);
-static void sigtstp_handler(int sign);
-static void check_background_jobs();
+static void     sigint_handler(int sign);
+static void     sigtstp_handler(int sign);
+static void     check_background_jobs();
 
 // Mandatos internos
 static int      check_internal_commands(tline* line);
@@ -58,19 +66,18 @@ int main(){
 
     sa.sa_handler = sigint_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_RESTART;
     if (sigaction(SIGINT, &sa, NULL) == -1) {
         perror("Error al configurar SIGINT");
         exit(1);
     }
 
+    // Configurar SIGTSTP
     sa.sa_handler = sigtstp_handler;
     if (sigaction(SIGTSTP, &sa, NULL) == -1) {
         perror("Error al configurar SIGTSTP");
         exit(1);
     }
-
-    
 
     while (1)
     {
@@ -83,22 +90,28 @@ int main(){
 
 static void sigint_handler(int sign) {
     (void)sign;
-    printf("\n");
-    fflush(stdout);
+
+    if (foreground_pid > 0) {
+        kill(foreground_pid, SIGINT); // Envía SIGINT al proceso en primer plano
+        printf("\n");
+    } else {
+        printf("\n" PROMPT); // Solo imprime el prompt si no hay proceso en primer plano
+        fflush(stdout);
+    }
 }
+
 static void sigtstp_handler(int sign) {
     (void)sign;
-    if (jobs_list != NULL) {
-        job_t *current = jobs_list;
-        if (!current->is_bg) {
-            kill(current->pid, SIGTSTP);
-            update_job_status(current->pid, JOB_STOPPED);
-            printf("\nProceso %d detenido.\n", current->pid);
-        }
+
+    if (foreground_pid > 0) {
+        kill(foreground_pid, SIGTSTP);  // Enviar SIGTSTP al proceso en primer plano
+        printf("\n");
+    } else {
+        printf("\n" PROMPT);
+        fflush(stdout);
     }
-    printf("\n" PROMPT);
-    fflush(stdout);
 }
+
 static void check_background_jobs() {
     int status;
     pid_t pid;
@@ -106,10 +119,12 @@ static void check_background_jobs() {
         job_t *job = jobs_list;
         while (job != NULL) {
             if (job->pid == pid) {
-                if (WIFSTOPPED(status)){
-                    job->status = JOB_STOPPED;
-                    printf("\n[%d]+ Stopped\t%s\n", job->job_id, job->command);
-                } else if (WIFEXITED(status) || WIFSIGNALED(status)){
+                if (WIFSTOPPED(status)) {
+                    if (job->status != JOB_STOPPED) {
+                        job->status = JOB_STOPPED;
+                        printf("\n[%d]+ Stopped\t%s\n", job->job_id, job->command);
+                    }
+                } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
                     printf("\n[%d]+ Done\t%s\n", job->job_id, job->command);
                     remove_job(pid);
                 }
@@ -174,19 +189,13 @@ static int     check_internal_commands(tline* line){
     return 0;
 }
 
-static int     execute_exit(){ // Como parametro los procesos en segundo plano
+static int     execute_exit(){
     // Matar procesos restantes
 
     job_t *current = jobs_list;
     if (current != NULL) {
         printf("Se están ejecutando procesos en segundo plano. \n");
-        while (current != NULL) {
-            printf("[%d] %d %s\n",
-                current->job_id,
-                current->pid,
-                current->command);
-            current = current->next;
-        }
+        execute_jobs();
         return 1;
     }
 
@@ -236,20 +245,47 @@ static char *create_command_string(tline *line) {
     return strdup(buffer);
 }
 
+static int get_available_id() {
+    job_t *current = jobs_list;
+    int id; // Comenzar con el menor ID posible
+
+    id = 1;
+    while (current) {
+        if (current->job_id == id) {
+            id++; // Buscar el siguiente ID más pequeño
+            current = jobs_list; // Reinicia la búsqueda
+        } else {
+            current = current->next;
+        }
+    }
+    return id; // Devuelve el menor ID no utilizado
+}
+
 static void add_job(pid_t pid, tline *line) {
     job_t *new_job = malloc(sizeof(job_t));
     if (!new_job) {
         perror("malloc");
         return;
     }
-    
+
     new_job->pid = pid;
     new_job->command = create_command_string(line);
     new_job->status = JOB_RUNNING;
-    new_job->job_id = next_job_id++;
+    new_job->job_id = get_available_id();
     new_job->is_bg = line->background;
     new_job->next = jobs_list;
     jobs_list = new_job;
+}
+
+static void add_available_id(int id) {
+    id_list_t *new_node = malloc(sizeof(id_list_t));
+    if (!new_node) {
+        perror("malloc");
+        return;
+    }
+    new_node->id = id;
+    new_node->next = available_ids;
+    available_ids = new_node;
 }
 
 static void remove_job(pid_t pid) {
@@ -263,6 +299,8 @@ static void remove_job(pid_t pid) {
             } else {
                 prev->next = current->next;
             }
+            // Añadimos la id para que sea reasignada
+            add_available_id(current->job_id);
             free(current->command);
             free(current);
             return;
@@ -308,7 +346,7 @@ static int execute_bg(tline *line) {
     kill(job->pid, SIGCONT);
     printf("[%d]+ %s &\n", job->job_id, job->command);
 
-    return 0;
+    return 1;
 }
 
 static void cleanup_jobs(void) {
@@ -321,32 +359,52 @@ static void cleanup_jobs(void) {
 }
 
 static int execute_jobs(void) {
-    job_t *current = jobs_list;
-    job_t *mostRecent = jobs_list;
-    job_t *last = NULL;
+    job_t *current;
+    int printed_jobs = 0;
+    int total_jobs = 0;
     char status_char;
-    
-    if (mostRecent != NULL && mostRecent->next != NULL) {
-        last = mostRecent->next;
-    }
 
+    // Contamos el número total de trabajos
+    current = jobs_list;
     while (current != NULL) {
-        if (current == mostRecent) {
-            status_char = '+';  // El más reciente
-        } else if (current == last) {
-            status_char = '-';  // El penúltimo
-        } else {
-            status_char = ' ';  // El resto
-        }
-        
-        printf("[%d]%c %s %s\n",
-            current->job_id,
-            status_char,
-            (current->status == JOB_RUNNING) ? "Running" : "Stopped",
-            current->command);
-        
+        total_jobs++;
         current = current->next;
     }
+
+    // Imprimimos los trabajos en orden ascendente
+    while (printed_jobs < total_jobs) {
+        job_t *smallest_job = NULL;
+        current = jobs_list;
+
+        while (current != NULL) {
+            // Encuentra el trabajo con el menor job_id no impreso
+            if ((!smallest_job || current->job_id < smallest_job->job_id) && current->job_id > printed_jobs) {
+                smallest_job = current;
+            }
+            current = current->next;
+        }
+
+        if (smallest_job != NULL) {
+            // Determina el símbolo de estado
+            if (smallest_job == jobs_list) {
+                status_char = '+';
+            } else if (smallest_job == jobs_list->next) {
+                status_char = '-';
+            } else {
+                status_char = ' ';
+            }
+
+            // Imprime el trabajo
+            printf("[%d]%c %s %s\n",
+                   smallest_job->job_id,
+                   status_char,
+                   (smallest_job->status == JOB_RUNNING) ? "Running" : "Stopped",
+                   smallest_job->command);
+
+            printed_jobs++;
+        }
+    }
+
     return 1;
 }
 
@@ -508,29 +566,47 @@ static void     execute_commands(tline* line){
         }   
         // pid = (proceso hijo) fork a almacenado el proceso hijo en pid para indicar que este es el proceso padre
         else if (pid > 0) {
- 
-            if (!line->background) {
-                int status;
-                waitpid(pid, &status, 0);
-            } 
-
-            // El proceso padre cierra los extremos del pipe que no necesita
-            if (last_pipe != -1) {
-                close(last_pipe);  // Cerramos el extremo de lectura del pipe anterior
-            }
-            if (i < line->ncommands - 1) {
-                close(pipefd[1]);  // Cerramos el extremo de escritura del pipe en el padre
-                last_pipe = pipefd[0];  // Guardamos el extremo de lectura para el próximo comando
-            }
-
             if (line->background && i == line->ncommands - 1) {
+                // Si es un proceso en segundo plano, agregarlo a la lista de trabajos
                 add_job(pid, line);
-                printf("[%d] %d\n", next_job_id - 1, pid);
+                job_t *job = jobs_list;
+                printf("[%d] %d\n", job->job_id, pid);
             } else if (!line->background) {
+                // Si es un proceso en primer plano
+                foreground_pid = pid;  // Guarda el PID del proceso en primer plano
                 int status;
-                waitpid(pid, &status, 0);
+
+                // Espera al proceso en primer plano
+                waitpid(pid, &status, WUNTRACED);
+                // Restablece foreground_pid si el proceso termina o es detenido
+                foreground_pid = -1;
+
+                if (WIFSTOPPED(status)) {
+                    // Si el proceso fue detenido, actualiza el estado en la lista de trabajos
+                    update_job_status(pid, JOB_STOPPED);
+                    job_t *job = jobs_list;
+                    while (job && job->pid != pid) {
+                        job = job->next;
+                    }
+                    if (job) {
+                        printf("\n[%d]+ Stopped\t%s\n", job->job_id, job->command);
+                    }
+                } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    // Si el proceso terminó, elimínalo de la lista de trabajos
+                    remove_job(pid);
+                }
             }
-        }
+
+    // Cierre de pipes
+    if (last_pipe != -1) {
+        close(last_pipe);  // Cerramos el extremo de lectura del pipe anterior
+    }
+    if (i < line->ncommands - 1) {
+        close(pipefd[1]);  // Cerramos el extremo de escritura del pipe en el padre
+        last_pipe = pipefd[0];  // Guardamos el extremo de lectura para el próximo comando
+    }
+}
+
         // Nos han devuelto -1 ha habido error en el fork
         else {
             // Error al crear el proceso hijo
