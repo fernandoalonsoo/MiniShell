@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #define PROMPT "\033[1;36m" "msh> " "\033[0m"
 #define SIZE 1024 // Tamaño buffer de stdin
@@ -95,7 +96,8 @@ static void sigint_handler(int sign) {
         kill(foreground_pid, SIGINT); // Envía SIGINT al proceso en primer plano
         printf("\n");
     } else {
-        printf("\n" PROMPT); // Solo imprime el prompt si no hay proceso en primer plano
+        printf("\n"); // Solo imprime el prompt si no hay proceso en primer plano
+        print_prompt();
         fflush(stdout);
     }
 }
@@ -107,7 +109,8 @@ static void sigtstp_handler(int sign) {
         kill(foreground_pid, SIGTSTP);  // Enviar SIGTSTP al proceso en primer plano
         printf("\n");
     } else {
-        printf("\n" PROMPT);
+        printf("\n");
+        print_prompt();
         fflush(stdout);
     }
 }
@@ -185,21 +188,28 @@ static int     check_internal_commands(tline* line){
     return 0;
 }
 
-static int     execute_exit(){
-    // Matar procesos restantes
-
+static int execute_exit() {
     job_t *current = jobs_list;
-    if (current != NULL) {
-        printf("Se están ejecutando procesos en segundo plano. \n");
-        execute_jobs();
-        return 1;
+
+    // Verificar si hay procesos en segundo plano
+    if (current != NULL) {        
+        // Recorrer la lista de trabajos y enviar SIGTERM
+        while (current != NULL) {
+            kill(current->pid, SIGKILL);  // Envía SIGTERM para terminar el proceso
+            current = current->next;
+        }
+
+        // Esperar a que todos los procesos hijos terminen en caso de que no lo hayan hecho correctamente
+        while (waitpid(-1, NULL, 0) > 0);
     }
 
+    // Limpiar la lista de trabajos
     cleanup_jobs();
-    
+
     exit(0);
-    return 1; 
+    return 1;  // Retorno para cumplir con la función, aunque no se alcanzará
 }
+
 
 static int     execute_cd(tline* line){
 
@@ -312,7 +322,7 @@ static int execute_bg(tline *line) {
 
     if (line->commands[0].argc == 1) {
         job_t *current = jobs_list;
-        while (current != NULL) {
+        while (current != NULL && !job) {
             if (current->status == JOB_STOPPED) {
                 job = current;
             }
@@ -406,7 +416,7 @@ static int execute_jobs(void) {
 
 static void update_job_status(pid_t pid, int status) {
     job_t *job = jobs_list;
-    while (job != NULL) {
+    while (job) {
         if (job->pid == pid) {
             job->status = status;
             return;
@@ -416,18 +426,38 @@ static void update_job_status(pid_t pid, int status) {
 }
 
 static void print_prompt() {
-    // char*   pwd;
+    char cwd[SIZE];   // Buffer para el directorio actual
+    char *user;       // Nombre del usuario
+    char *dir_name;   // Nombre del directorio actual
 
-     fputs(PROMPT, stdout);
+    // Obtener el nombre del usuario
+    user = getenv("USER");
+    if (!user) {
+        user = "unknown";
+    }
 
-/*     pwd = getenv("PWD");
-    printf("%s %s", pwd, PROMPT);   */ 
+    // Obtener el directorio actual
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        perror("Error obteniendo el directorio actual");
+        dir_name = "unknown";
+    } else {
+        // Obtener solo el último segmento (nombre del directorio)
+        dir_name = strrchr(cwd, '/');
+        dir_name = (dir_name != NULL) ? dir_name + 1 : cwd;
+    }
 
+    printf("\n┌──(%s㉿%s)-[%s]\n", user, user, cwd);
+    printf("└─%s", PROMPT);
 }
 
 static void read_command(char** buffer, tline** line) {
 
     *buffer = read_line(stdin);
+
+    // Controlamos el ^D para que cierre la
+    if (*buffer == NULL)
+        execute_exit();
+    
     *line = tokenize(*buffer);
 }
 
@@ -577,16 +607,17 @@ static void     execute_commands(tline* line){
 
                 if (WIFSTOPPED(status)) {
                     // Si el proceso fue detenido, actualiza su estado
-                    update_job_status(pid, JOB_STOPPED);
                     job_t *job = jobs_list;
                     while (job && job->pid != pid) {
                         job = job->next;
                     }
                     if (job) {
+                        update_job_status(pid, JOB_STOPPED);
                         printf("[%d]+ Stopped\t%s\n", job->job_id, job->command);
                     } else {
                         // Si el trabajo no está en la lista, agrégalo como detenido
                         add_job(pid, line);
+                        update_job_status(pid, JOB_STOPPED);
                         printf("[%d]+ Stopped\t%s\n", get_available_id() - 1, line->commands[i].argv[0]);
                     }
                 } else if (WIFEXITED(status) || WIFSIGNALED(status)) {
