@@ -136,17 +136,17 @@ static void check_background_jobs() {
 
 static int execute_umask(tline* line) {
     mode_t mask;
-
+    
     // Pipes?
-    if (line->ncommands > 1) {
-        fprintf(stderr, "umask no se puede ejecutar con pipes.\n");
-        return 1;
-    }
+        if (line -> ncommands != 1){
+            fprintf(stderr, "umask: uso incorrecto. No compatible con pipes\n");
+            return 2;
+        }
 
     // +1 argumento?
     if (line->commands[0].argc > 2) {
         fprintf(stderr, "demasiados argumentos.\n");
-        return 1;
+        return 2;
     }
 
     // =1 argumento?
@@ -212,6 +212,11 @@ static int execute_exit() {
 
 
 static int     execute_cd(tline* line){
+
+        if (line -> ncommands != 1){
+            fprintf(stderr, "cd: uso incorrecto. No compatible con pipes\n");
+            return 2;
+        }
 
         if (line -> commands[0].argc > 1)
         {
@@ -525,10 +530,10 @@ static void     execute_commands(tline* line){
     if (!(line -> ncommands > 0))
         return;
 
-    i = 0;
-    if (check_internal_commands(line) == 1) {
-        // Si es el único comando, no hace falta continuar
-        if (line->ncommands == 1) {
+    i = check_internal_commands(line);
+    if (i) {
+        // Si es el único comando / es CD o es Umask,  no hace falta continuar
+        if (line->ncommands == 1 || i == 2) {
             return;
         }
         i++;  // Sino incrementamos en 1
