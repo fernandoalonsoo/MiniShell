@@ -33,11 +33,10 @@ typedef struct id_node {
 
 static id_list_t *available_ids = NULL;
 
-static pid_t foreground_pid = -1; // = PIP cuando hay proceso en primer plano, -1 cuando no hay procesos
+static pid_t foreground_pid = -1; // = PIP cuando hay proceso en primer plano, = -1 cuando no hay procesos
 
 // Signal handlers
-static void     sigint_handler(int sign);
-static void     sigtstp_handler(int sign);
+static void     initialize_signals();
 static void     check_background_jobs();
 
 // Mandatos internos
@@ -63,22 +62,8 @@ static void     execute_commands(tline* line);
 int main(){
     tline*              line;
     char*               buffer;
-    struct sigaction    sa;
 
-    sa.sa_handler = sigint_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGINT, &sa, NULL) == -1) {
-        perror("Error al configurar SIGINT");
-        exit(1);
-    }
-
-    // Configurar SIGTSTP
-    sa.sa_handler = sigtstp_handler;
-    if (sigaction(SIGTSTP, &sa, NULL) == -1) {
-        perror("Error al configurar SIGTSTP");
-        exit(1);
-    }
+    initialize_signals();
 
     while (1)
     {
@@ -90,7 +75,7 @@ int main(){
 }
 
 static void sigint_handler(int sign) {
-    (void)sign;
+    (void)sign; // Se ignora
 
     if (foreground_pid > 0) {
         kill(foreground_pid, SIGINT); // Envía SIGINT al proceso en primer plano
@@ -103,17 +88,50 @@ static void sigint_handler(int sign) {
 }
 
 static void sigtstp_handler(int sign) {
-    (void)sign;
+    (void)sign; // Se ignora
 
     if (foreground_pid > 0) {
         kill(foreground_pid, SIGTSTP);  // Enviar SIGTSTP al proceso en primer plano
-        printf("\n");
+        
+        // Buscar el job correspondiente al PID
+        job_t *job = jobs_list;
+        while (job && job->pid != foreground_pid) {
+            job = job->next;
+        }
+        
+        if (job) {
+            printf("El proceso \n[%d]+ se ha detenido y enviado a segundo plano\t%s\n", job->job_id, job->command);
+        } else {
+            // Si el job no existe en la lista, se creará en execute_commands
+            printf("\nEl proceso %d se ha detenido.\n", foreground_pid);
+        }
     } else {
         printf("\n");
         print_prompt();
         fflush(stdout);
     }
 }
+
+
+static void initialize_signals(){
+    struct sigaction    sa;
+
+    sa.sa_handler = sigint_handler; // Puntero a la función
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        fprintf(stderr, "Error al configurar SINGINT\n");
+        exit(1);
+    }
+
+    // Configurar SIGTSTP
+    sa.sa_handler = sigtstp_handler; // Puntero a la función
+    if (sigaction(SIGTSTP, &sa, NULL) == -1) {
+        fprintf(stderr, "Error al configurar SINGSTP\n");
+        exit(1);
+    }
+}
+
 
 static void check_background_jobs() {
     int status;
@@ -138,14 +156,14 @@ static int execute_umask(tline* line) {
     mode_t mask;
     
     // Pipes?
-        if (line -> ncommands != 1){
-            fprintf(stderr, "umask: uso incorrecto. No compatible con pipes\n");
-            return 2;
-        }
+    if (line -> ncommands != 1){
+        fprintf(stderr, "umask: uso incorrecto. No compatible con pipes\n");
+        return 2;
+    }
 
     // +1 argumento?
     if (line->commands[0].argc > 2) {
-        fprintf(stderr, "demasiados argumentos.\n");
+        fprintf(stderr, "umask: uso incorrecto. Demasiados argumentos.\n");
         return 2;
     }
 
@@ -221,7 +239,7 @@ static int     execute_cd(tline* line){
         if (line -> commands[0].argc > 1)
         {
             if (chdir(line -> commands[0].argv[1]) != 0)
-                perror("cd");
+                fprintf(stderr, "cd: Error. No se ha podido cambiar de directorio\n");
         }
         else
         {
@@ -231,7 +249,7 @@ static int     execute_cd(tline* line){
             else
             {
                 if (chdir(home) != 0)
-                    perror("cd");
+                    fprintf(stderr, "cd: Error. No se ha podido cambiar de directorio\n");
             }
         }
         return 1; // Salir de la función exitosamente ejecutando cd
@@ -275,7 +293,7 @@ static int get_available_id() {
 static void add_job(pid_t pid, tline *line) {
     job_t *new_job = malloc(sizeof(job_t));
     if (!new_job) {
-        perror("malloc");
+        fprintf(stderr, "Error al reservar memoria\n");
         return;
     }
 
@@ -291,7 +309,7 @@ static void add_job(pid_t pid, tline *line) {
 static void add_available_id(int id) {
     id_list_t *new_node = malloc(sizeof(id_list_t));
     if (!new_node) {
-        perror("malloc");
+        fprintf(stderr, "Error al reservar memoria\n");
         return;
     }
     new_node->id = id;
@@ -323,9 +341,10 @@ static void remove_job(pid_t pid) {
 
 static int execute_bg(tline *line) {
     job_t *job = NULL;
-    int job_id;
+    pid_t pid;
 
     if (line->commands[0].argc == 1) {
+        // Sin argumentos - buscar el último trabajo detenido
         job_t *current = jobs_list;
         while (current != NULL && !job) {
             if (current->status == JOB_STOPPED) {
@@ -334,10 +353,11 @@ static int execute_bg(tline *line) {
             current = current->next;
         }
     } else if (line->commands[0].argc == 2) {
-        job_id = atoi(line->commands[0].argv[1]);
+        // Con argumento - buscar por PID
+        pid = (pid_t)atoi(line->commands[0].argv[1]);
         job_t *current = jobs_list;
         while (current != NULL) {
-            if (current->job_id == job_id && current->status == JOB_STOPPED) {
+            if (current->pid == pid && current->status == JOB_STOPPED) {
                 job = current;
                 break;
             }
@@ -349,13 +369,13 @@ static int execute_bg(tline *line) {
     }
 
     if (job == NULL) {
-        fprintf(stderr, "bg: no hay trabajos detenidos\n");
+        fprintf(stderr, "bg: no hay trabajos detenidos con ese PID\n");
         return 1;
     }
 
     job->status = JOB_RUNNING;
     kill(job->pid, SIGCONT);
-    printf("[%d]+ %s\n", job->job_id, job->command);
+    printf("[%d]+ %s &\n", job->job_id, job->command);
 
     return 1;
 }
@@ -443,10 +463,10 @@ static void print_prompt() {
 
     // Obtener el directorio actual
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
-        perror("Error obteniendo el directorio actual");
+        fprintf(stderr, "Error obteniendo el directorio actual\n");
         dir_name = "unknown";
     } else {
-        // Obtener solo el último segmento (nombre del directorio)
+        //  Obtener nombre del directorio
         dir_name = strrchr(cwd, '/');
         dir_name = (dir_name != NULL) ? dir_name + 1 : cwd;
     }
@@ -546,7 +566,6 @@ static void     execute_commands(tline* line){
         if (i < line -> ncommands - 1)
         {
             if (pipe(pipefd) == -1) {
-                perror("pipe");
                 exit(EXIT_FAILURE);
             }
         }
@@ -561,7 +580,6 @@ static void     execute_commands(tline* line){
             // Si no es el primer comando, redirigir la entrada estándar al pipe anterior
             if (last_pipe != -1) {
                 if (dup2(last_pipe, STDIN_FILENO) == -1) {
-                    perror("dup2");
                     exit(EXIT_FAILURE);
                 }
                 close(last_pipe);  // Cerramos después de redirigir
@@ -645,7 +663,7 @@ static void     execute_commands(tline* line){
         // Nos han devuelto -1 ha habido error en el fork
         else {
             // Error al crear el proceso hijo
-            perror("fork");
+            fprintf(stderr, "Error al crear el proceso hijo");
             exit(EXIT_FAILURE);
         }
     } 
