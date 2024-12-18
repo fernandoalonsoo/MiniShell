@@ -136,7 +136,7 @@ static void initialize_signals(){
 static void check_background_jobs() {
     int status;
     pid_t pid;
-    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0) {
         job_t *job = jobs_list;
         while (job) {
             if (job->pid == pid) {
@@ -373,9 +373,12 @@ static int execute_bg(tline *line) {
         return 1;
     }
 
-    job->status = JOB_RUNNING;
-    kill(job->pid, SIGCONT);
-    printf("[%d]+ %s &\n", job->job_id, job->command);
+    if (kill(job->pid, SIGCONT) == 0) {
+        job->status = JOB_RUNNING;
+        printf("[%d]+ Running    %s\n", job->job_id, job->command);
+    } else {
+        fprintf(stderr, "bg: no se pudo reanudar el proceso\n");
+    }
 
     return 1;
 }
